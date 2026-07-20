@@ -1,0 +1,4 @@
+name: proton-pass
+version: 0.1.0
+description: Resolve Hermes credentials from Proton Pass (pass://) via pass-cli
+author: Formenos Land
