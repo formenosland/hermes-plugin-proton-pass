@@ -1,12 +1,13 @@
-"""Proton Pass (`pass-cli`) secret source for Hermes Agent."""
+"""Proton Pass (`pass-cli`) bulk secret source for Hermes Agent."""
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from agent.secret_sources.base import (
     DEFAULT_CLI_TIMEOUT_SECONDS,
@@ -14,7 +15,6 @@ from agent.secret_sources.base import (
     ErrorKind,
     FetchResult,
     SecretSource,
-    is_valid_env_name,
     run_secret_cli,
     scrub_ansi,
 )
@@ -26,7 +26,8 @@ DEFAULT_TOKEN_ENV = "PROTON_PASS_PERSONAL_ACCESS_TOKEN"
 _CLI_RUN_TIMEOUT = DEFAULT_CLI_TIMEOUT_SECONDS
 
 _PASS_SCHEME = "pass://"
-_TOTP_QUERY_RE = re.compile(r"^\?totp=(?:code|uri)$")
+_ENV_TITLE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+_SHARE_ID_RE = re.compile(r"^[A-Za-z0-9]{16,}$")
 
 _STATIC_ALLOW_ENV = (
     "PROTON_PASS_SESSION_DIR",
@@ -45,6 +46,10 @@ def _token_env_name(cfg: dict) -> str:
     return str(cfg.get("personal_access_token_env") or DEFAULT_TOKEN_ENV)
 
 
+def _vault_name(cfg: dict) -> str:
+    return str(cfg.get("vault") or "").strip()
+
+
 def _allow_env(token_env: str) -> Tuple[str, ...]:
     # Always allowlist the name pass-cli reads, plus the configured name (in
     # case they differ and the operator also exported the official name).
@@ -57,46 +62,61 @@ def _child_extra_env(token: str) -> Dict[str, str]:
     return {DEFAULT_TOKEN_ENV: token}
 
 
-def _is_valid_pass_ref(ref: str) -> bool:
-    if not ref.startswith(_PASS_SCHEME):
-        return False
-
-    rest = ref[len(_PASS_SCHEME) :]
-    path_part, sep, query = rest.partition("?")
-    if sep and not _TOTP_QUERY_RE.match(f"?{query}"):
-        return False
-
-    parts = [segment for segment in path_part.split("/") if segment]
-    return len(parts) >= 3
+def _is_share_id(vault: str) -> bool:
+    return bool(_SHARE_ID_RE.fullmatch(vault))
 
 
-def _validate_references(
-    references: Optional[Dict[str, object]],
-) -> Tuple[Dict[str, str], List[str]]:
-    valid: Dict[str, str] = {}
-    warnings: List[str] = []
+def _password_ref(vault: str, title: str) -> str:
+    return f"{_PASS_SCHEME}{vault}/{title}/password"
 
-    if not isinstance(references, dict):
-        return valid, warnings
 
-    for name, ref in references.items():
-        if not is_valid_env_name(name):
-            warnings.append(f"Skipping {name!r}: not a valid env-var name")
+def _extract_title(item: object) -> Optional[str]:
+    if isinstance(item, str):
+        cleaned = item.strip()
+        return cleaned or None
+    if not isinstance(item, dict):
+        return None
+    for key in ("title", "name", "itemTitle"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    nested = item.get("item")
+    if isinstance(nested, dict):
+        return _extract_title(nested)
+    return None
+
+
+def _iter_list_payload(payload: object) -> Iterable[object]:
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("items", "data", "result"):
+            inner = payload.get(key)
+            if isinstance(inner, list):
+                return inner
+        return [payload]
+    return ()
+
+
+def parse_item_titles(raw: str) -> List[str]:
+    """Extract unique item titles from `pass-cli item list --output json`."""
+    text = (raw or "").strip()
+    if not text:
+        return []
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+
+    titles: List[str] = []
+    seen: set[str] = set()
+    for item in _iter_list_payload(payload):
+        title = _extract_title(item)
+        if not title or title in seen:
             continue
-        if not isinstance(ref, str):
-            warnings.append(f"Skipping {name!r}: reference is not a string")
-            continue
-
-        cleaned = ref.strip()
-        if not _is_valid_pass_ref(cleaned):
-            warnings.append(
-                f"Skipping {name!r}: {ref!r} is not a valid "
-                "pass://vault/item/field reference"
-            )
-            continue
-        valid[name] = cleaned
-
-    return valid, warnings
+        seen.add(title)
+        titles.append(title)
+    return titles
 
 
 def _find_binary(binary_path: str) -> Optional[Path]:
@@ -224,12 +244,45 @@ def _ensure_session(
     return True
 
 
+def _list_argv(binary: Path, vault: str) -> List[str]:
+    argv = [
+        str(binary),
+        "item",
+        "list",
+        "--output",
+        "json",
+        "--filter-state",
+        "active",
+    ]
+    if _is_share_id(vault):
+        argv.extend(["--share-id", vault])
+    else:
+        argv.extend(["--vault-name", vault])
+    return argv
+
+
+def _view_password(
+    binary: Path,
+    vault: str,
+    title: str,
+    *,
+    allow_env: Sequence[str],
+    token: str,
+):
+    ref = _password_ref(vault, title)
+    return _run_cli(
+        [str(binary), "item", "view", "--", ref],
+        allow_env=allow_env,
+        token=token,
+    ), ref
+
+
 class ProtonPassSource(SecretSource):
-    """Resolve mapped env vars from Proton Pass pass:// references via pass-cli."""
+    """Bulk-inject env vars from Proton Pass item titles via pass-cli."""
 
     name = "protonpass"
     label = "Proton Pass"
-    shape = "mapped"
+    shape = "bulk"
     scheme = "pass"
 
     def override_existing(self, cfg: dict) -> bool:
@@ -244,9 +297,9 @@ class ProtonPassSource(SecretSource):
     def config_schema(self) -> dict:
         return {
             "enabled": {"description": "Master switch", "default": False},
-            "env": {
-                "description": "Map of ENV_VAR -> pass://vault/item/field reference",
-                "default": {},
+            "vault": {
+                "description": "Vault name or share id to dump (required)",
+                "default": "",
             },
             "personal_access_token_env": {
                 "description": "Env var holding the Proton Pass personal access token",
@@ -276,31 +329,20 @@ class ProtonPassSource(SecretSource):
             return result
 
     def _fetch_impl(self, cfg: dict, result: FetchResult) -> FetchResult:
-        env_map = cfg.get("env")
-        valid, warnings = _validate_references(
-            env_map if isinstance(env_map, dict) else None
-        )
-        result.warnings.extend(warnings)
-
-        if not valid:
-            if not warnings:
-                result.error = (
-                    "secrets.protonpass.enabled is true but the env: map is empty. "
-                    "Add ENV_VAR: pass://vault/item/field entries."
-                )
-            else:
-                result.error = (
-                    "secrets.protonpass.enabled is true but no valid pass:// "
-                    "references were found in the env: map."
-                )
-            result.error_kind = ErrorKind.NOT_CONFIGURED
-            return result
-
+        vault = _vault_name(cfg)
         token_env = _token_env_name(cfg)
         token = os.environ.get(token_env, "").strip()
-        if not token:
+
+        if not vault or not token:
+            missing = []
+            if not vault:
+                missing.append("secrets.protonpass.vault")
+            if not token:
+                missing.append(token_env)
             result.error = (
-                f"secrets.protonpass.enabled is true but {token_env} is not set."
+                "secrets.protonpass.enabled is true but "
+                + " and ".join(f"{name} is not set" for name in missing)
+                + "."
             )
             result.error_kind = ErrorKind.NOT_CONFIGURED
             return result
@@ -327,18 +369,49 @@ class ProtonPassSource(SecretSource):
         if not _ensure_session(binary, allow_env, token, result):
             return result
 
+        try:
+            list_proc = _run_cli(
+                _list_argv(binary, vault),
+                allow_env=allow_env,
+                token=token,
+            )
+        except RuntimeError as exc:
+            result.error = str(exc)
+            result.error_kind = _classify_stderr(str(exc))
+            return result
+
+        if list_proc.returncode != 0:
+            stderr = list_proc.stderr or ""
+            result.error = _format_cli_error("item list", list_proc.returncode, stderr)
+            result.error_kind = _classify_stderr(stderr)
+            return result
+
+        titles = parse_item_titles(list_proc.stdout or "")
+        matching = [title for title in titles if _ENV_TITLE_RE.fullmatch(title)]
+        skipped = len(titles) - len(matching)
+        if skipped:
+            result.warnings.append(
+                f"Skipped {skipped} Proton Pass item(s) whose titles are not "
+                "env-var names (^[A-Z][A-Z0-9_]{0,63}$)."
+            )
+        if not titles:
+            result.warnings.append(
+                f"Proton Pass vault {vault!r} listed no items."
+            )
+
         secrets: Dict[str, str] = {}
-        for name in sorted(valid):
-            ref = valid[name]
+        for title in matching:
             try:
-                proc = _run_cli(
-                    [str(binary), "item", "view", "--", ref],
+                proc, ref = _view_password(
+                    binary,
+                    vault,
+                    title,
                     allow_env=allow_env,
                     token=token,
                 )
             except RuntimeError as exc:
                 message = str(exc)
-                result.warnings.append(f"Skipping {name!r}: {message}")
+                result.warnings.append(f"Skipping {title!r}: {message}")
                 if _stderr_looks_auth_related(message):
                     result.error = message
                     result.error_kind = _classify_stderr(message)
@@ -348,7 +421,7 @@ class ProtonPassSource(SecretSource):
             if proc.returncode != 0:
                 stderr = proc.stderr or ""
                 message = _format_cli_error("item view", proc.returncode, stderr)
-                result.warnings.append(f"Skipping {name!r}: {message}")
+                result.warnings.append(f"Skipping {title!r}: {message}")
                 if _stderr_looks_auth_related(stderr):
                     result.error = message
                     result.error_kind = _classify_stderr(stderr)
@@ -358,12 +431,12 @@ class ProtonPassSource(SecretSource):
             value = (proc.stdout or "").rstrip("\r\n")
             if not value.strip():
                 result.warnings.append(
-                    f"Skipping {name!r}: pass-cli returned an empty value "
+                    f"Skipping {title!r}: pass-cli returned an empty value "
                     f"for {ref!r} ({ErrorKind.EMPTY_VALUE.value})"
                 )
                 continue
 
-            secrets[name] = value
+            secrets[title] = value
 
         result.secrets = secrets
         return result

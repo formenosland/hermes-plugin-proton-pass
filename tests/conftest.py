@@ -33,6 +33,7 @@ def _install_agent_stubs() -> None:
         INTERNAL = "internal"
 
     DEFAULT_CLI_TIMEOUT_SECONDS = 30.0
+    DEFAULT_FETCH_TIMEOUT_SECONDS = 120.0
 
     @dataclass
     class FetchResult:
@@ -69,7 +70,13 @@ def _install_agent_stubs() -> None:
             return frozenset()
 
         def fetch_timeout_seconds(self, cfg: dict) -> float:
-            return 120.0
+            try:
+                val = float(
+                    (cfg or {}).get("timeout_seconds", DEFAULT_FETCH_TIMEOUT_SECONDS)
+                )
+            except (TypeError, ValueError):
+                return DEFAULT_FETCH_TIMEOUT_SECONDS
+            return val if val > 0 else DEFAULT_FETCH_TIMEOUT_SECONDS
 
         def config_schema(self) -> dict:
             return {}
@@ -104,6 +111,7 @@ def _install_agent_stubs() -> None:
     base.FetchResult = FetchResult
     base.SecretSource = SecretSource
     base.DEFAULT_CLI_TIMEOUT_SECONDS = DEFAULT_CLI_TIMEOUT_SECONDS
+    base.DEFAULT_FETCH_TIMEOUT_SECONDS = DEFAULT_FETCH_TIMEOUT_SECONDS
     base.is_valid_env_name = is_valid_env_name
     base.scrub_ansi = scrub_ansi
     base.run_secret_cli = run_secret_cli

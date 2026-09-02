@@ -1,12 +1,13 @@
 # hermes-plugin-proton-pass
 
-Hermes Agent secret-source plugin that resolves provider credentials from [Proton Pass](https://proton.me/pass) via `pass-cli` and `pass://` references.
+Hermes Agent secret-source plugin that bulk-injects provider credentials from a [Proton Pass](https://proton.me/pass) vault via `pass-cli`. Item titles that look like env-var names become process environment keys; the password field is the value. Same shape as Hermes Bitwarden (`shape = "bulk"`), not a mapped `env:` / `pass://` catalog.
 
 ## Features
 
-- **Mapped `pass://` references** — bind Hermes env vars to `pass://vault/item/field` (names or IDs; optional `?totp=code|uri`)
-- **Bootstrap PAT model** — one scoped personal access token in `~/.hermes/.env`, same pattern as Bitwarden and 1Password
-- **`pass-cli` subprocess via `run_secret_cli`** — minimal allowlisted child env; argv-only; stdin closed; no shell
+- **Bulk vault dump** — list items in one required vault; inject titles matching `^[A-Z][A-Z0-9_]{0,63}$`
+- **Password field only** — Netflix-style titles are skipped; empty passwords are never applied (`EMPTY_VALUE`)
+- **Bootstrap PAT** — personal access token from the process environment (systemd `EnvironmentFile`, Hermes `.env`, or the shell). `.env` is optional.
+- **`pass-cli` subprocess via `run_secret_cli`** — minimal allowlisted child env; argv-only; stdin closed; no shell; never full `os.environ`
 - **Non-interactive session ensure** — `pass-cli test` then `pass-cli login` when needed; never prompts on the startup path
 - **Fail-open `ErrorKind`s** — structured errors (`NOT_CONFIGURED`, `AUTH_FAILED`, etc.); Hermes startup continues; missing secrets are reported, not fatal
 - **Protected bootstrap token** — `protected_env_vars` prevents any secret source from overwriting the PAT
@@ -14,19 +15,19 @@ Hermes Agent secret-source plugin that resolves provider credentials from [Proto
 
 ## Requirements
 
-- [Hermes Agent](https://hermes-agent.nousresearch.com/) with secret-source plugin support
+- [Hermes Agent](https://hermes-agent.nousresearch.com/) with secret-source plugin support, including plugin secret re-pull after discovery ([#64177](https://github.com/NousResearch/hermes-agent/issues/64177))
 - [Proton Pass CLI](https://protonpass.github.io/pass-cli/) (`pass-cli`) on `PATH`
-- A scoped Proton Pass [personal access token](https://protonpass.github.io/pass-cli/commands/personal-access-token/) with access to the vaults or items you reference
+- A scoped Proton Pass [personal access token](https://protonpass.github.io/pass-cli/commands/personal-access-token/) with access to the configured vault
 
 ## How it works
 
-Hermes loads `~/.hermes/.env` first (bootstrap credentials). When `secrets.protonpass` is enabled, this plugin reads your PAT from the configured env var, ensures a `pass-cli` session, and resolves each entry in `secrets.protonpass.env` by calling `pass-cli item view` with the `pass://` reference. Resolved values are returned to the Hermes orchestrator, which applies them to the process environment according to source precedence and `override_existing`. The plugin never writes `os.environ` itself.
+When `secrets.protonpass` is enabled, this plugin reads the PAT from the configured env var, ensures a `pass-cli` session, lists active items in `secrets.protonpass.vault`, and for each title that is a valid env-var name fetches the password field (`pass-cli item view` is an internal helper, not operator config). Resolved values are returned to the Hermes orchestrator, which applies them according to source precedence and `override_existing`. The plugin never writes `os.environ` itself. Product code maps those env names onto Hermes; this plugin does not ship an `env:` map.
 
 Further reading:
 
 - [Hermes secret-source plugin contract](https://hermes-agent.nousresearch.com/docs/developer-guide/secret-source-plugin)
 - [Hermes secrets user guide](https://hermes-agent.nousresearch.com/docs/user-guide/secrets/)
-- [Proton Pass CLI secret references](https://protonpass.github.io/pass-cli/commands/contents/secret-references/)
+- [Proton Pass CLI item commands](https://protonpass.github.io/pass-cli/commands/item/)
 - [Proton Pass CLI personal access tokens](https://protonpass.github.io/pass-cli/commands/personal-access-token/)
 
 ## Install
@@ -39,11 +40,11 @@ Further reading:
 
    Or via Homebrew: `brew install protonpass/tap/pass-cli`
 
-2. **Create a scoped PAT** — grant the minimum access needed (prefer `viewer` on specific vaults or items):
+2. **Create a scoped PAT** — grant the minimum access needed (prefer `viewer` on the Hermes vault):
 
    ```bash
    pass-cli pat create --name "hermes-agent" --expiration 3m
-   pass-cli pat access grant --pat-name "hermes-agent" --vault-name "My Vault" --role viewer
+   pass-cli pat access grant --pat-name "hermes-agent" --vault-name "Personal" --role viewer
    ```
 
 3. **Install the plugin** into your Hermes plugins directory:
@@ -64,14 +65,17 @@ Further reading:
 
    Or run: `hermes plugins enable proton-pass`
 
-5. **Store the PAT** in `~/.hermes/.env`:
+5. **Provide the PAT** in the process environment. systemd units can use `EnvironmentFile`; Hermes `~/.hermes/.env` is optional:
 
    ```bash
    PROTON_PASS_PERSONAL_ACCESS_TOKEN=pst_…::…
-   chmod 600 ~/.hermes/.env
    ```
 
-6. **Configure `secrets.protonpass`** — see [Configuration](#configuration) below.
+   If you use `~/.hermes/.env`, `chmod 600` it.
+
+6. **Name vault items like env vars** — e.g. `OPENAI_API_KEY`, `GITHUB_TOKEN`. Put the secret in the **password** field. Titles such as `Netflix` are skipped.
+
+7. **Configure `secrets.protonpass`** — see [Configuration](#configuration) below.
 
 ## Configuration
 
@@ -80,7 +84,7 @@ Config section: `secrets.protonpass` (source name: `protonpass`).
 | Key | Description |
 | --- | --- |
 | `enabled` | Enable this secret source (`false` by default) |
-| `env` | Map of env var name → `pass://` reference |
+| `vault` | Vault name or share id (required) |
 | `personal_access_token_env` | Env var holding the bootstrap PAT (default: `PROTON_PASS_PERSONAL_ACCESS_TOKEN`) |
 | `binary_path` | Absolute path to `pass-cli` (optional; pins the binary and skips `PATH` lookup) |
 | `override_existing` | Replace env vars already set before secret sources run (default: `true`) |
@@ -98,31 +102,17 @@ secrets:
     - protonpass
   protonpass:
     enabled: true
+    vault: Personal
     personal_access_token_env: PROTON_PASS_PERSONAL_ACCESS_TOKEN
     override_existing: true
     timeout_seconds: 120
-    env:
-      OPENAI_API_KEY: pass://API Keys/OpenAI/api_key
-      ANTHROPIC_API_KEY: pass://API Keys/Anthropic/secret_key
-      GITHUB_TOKEN: pass://Work/GitHub/password
 ```
 
-### `pass://` reference format
-
-```
-pass://<vault>/<item>/<field>[?totp=code|uri]
-```
-
-- **vault** — Share ID or vault name (e.g. `Work`, `AbCdEf123456`)
-- **item** — Item ID or title (e.g. `GitHub`, `XyZ789`)
-- **field** — Field name (e.g. `password`, `username`, `api_key`, `totp`)
-- **totp** (optional) — `?totp=code` (default) returns the current TOTP code; `?totp=uri` returns the raw `otpauth://` URI
-
-Names with spaces are supported: `pass://My Vault/My Item/password`. For unambiguous targeting, use Share ID and Item ID. See the [secret references documentation](https://protonpass.github.io/pass-cli/commands/contents/secret-references/) for section-qualified fields and TOTP behavior.
+There is no `env:` map and no operator-maintained `pass://` lines.
 
 ## Authentication
 
-This plugin follows the same bootstrap-token model as Hermes's bundled Bitwarden and 1Password sources: one machine-local PAT in `~/.hermes/.env` unlocks the vault; everything else is resolved from `pass://` maps in config.
+This plugin follows the same bootstrap-token model as Hermes's bundled Bitwarden source: one machine-local PAT unlocks the vault; item titles in that vault become env vars.
 
 On fetch, the plugin checks the session with `pass-cli test`. If the session is missing or invalid, it runs `pass-cli login` non-interactively using the PAT from the allowlisted child environment. It never prompts — startup runs in non-TTY contexts (gateway, cron, Docker).
 
@@ -132,16 +122,16 @@ On fetch, the plugin checks the session with `pass-cli test`. If the session is 
 export PROTON_PASS_KEY_PROVIDER=fs
 ```
 
-Optional overrides: `PROTON_PASS_SESSION_DIR`, `PROTON_PASS_ENCRYPTION_KEY`, `PROTON_PASS_LINUX_KEYRING`.
+Optional overrides: `PROTON_PASS_SESSION_DIR`, `PROTON_PASS_ENCRYPTION_KEY`, `PROTON_PASS_LINUX_KEYRING`. These names are allowlisted into the `pass-cli` child; the plugin never forwards the full process environment.
 
 ## Security
 
-- **Scope the PAT** to the minimum vaults or items Hermes needs; prefer `viewer`; set expiration; rotate on schedule
-- **Protect `~/.hermes/.env`** — `chmod 600`; never commit the PAT to version control
-- **Bootstrap token protection** — the PAT env var is listed in `protected_env_vars`; no secret source (including this one) can overwrite it via a mapped ref
-- **Minimal child environment** — `pass-cli` is invoked through Hermes `run_secret_cli` with an allowlisted env only; the plugin never passes the full process environment
+- **Scope the PAT** to the minimum vault Hermes needs; prefer `viewer`; set expiration; rotate on schedule
+- **Protect the PAT** — systemd `EnvironmentFile` or `chmod 600 ~/.hermes/.env`; never commit the token
+- **Bootstrap token protection** — the PAT env var is listed in `protected_env_vars`; no secret source can overwrite it
+- **Minimal child environment** — `pass-cli` is invoked through Hermes `run_secret_cli` with an allowlisted env only
 - **No direct env writes** — the plugin returns resolved values; Hermes owns `os.environ` application, precedence, and provenance labels
-- **Treat the PAT as a machine credential** — a leak grants vault access within the token's scope and role; protect it like any other long-lived automation secret
+- **Treat the PAT as a machine credential** — a leak grants vault access within the token's scope and role
 
 ## Failure modes
 
@@ -149,21 +139,17 @@ Hermes fail-opens on secret-source errors: startup continues, but affected crede
 
 | Symptom | ErrorKind | Likely cause | Fix |
 | --- | --- | --- | --- |
-| Source skipped; "not set" / no `env` map | `NOT_CONFIGURED` | `enabled: true` but missing PAT, empty `env` map, or invalid config | Set `PROTON_PASS_PERSONAL_ACCESS_TOKEN` in `~/.hermes/.env`; add `env` entries |
+| Source skipped; vault or PAT missing | `NOT_CONFIGURED` | `enabled: true` but blank `vault` or unset PAT | Set `secrets.protonpass.vault`; export `PROTON_PASS_PERSONAL_ACCESS_TOKEN` |
 | `pass-cli` not found | `BINARY_MISSING` | CLI not installed or not on `PATH` | Install `pass-cli` or set `binary_path` |
-| Login or session check failed | `AUTH_FAILED` | Invalid or revoked PAT; insufficient vault grants | Recreate PAT; `pass-cli pat access grant` for referenced vaults/items |
-| Token expired message in stderr | `AUTH_EXPIRED` | PAT past expiration | Create a new PAT; update `~/.hermes/.env` |
-| Warning per ref; ref skipped | `REF_INVALID` | Malformed `pass://` or unknown vault/item/field | Fix reference format; verify with `pass-cli item view` |
-| Warning per ref; value skipped | `EMPTY_VALUE` | Field exists but returned empty | Check field in Proton Pass; do not map empty secrets |
-| Fetch aborted; timeout message | `TIMEOUT` | Resolution exceeded `timeout_seconds` | Increase timeout; reduce map size; check network |
+| Login or session check failed | `AUTH_FAILED` | Invalid or revoked PAT; insufficient vault grants | Recreate PAT; `pass-cli pat access grant` for the vault |
+| Token expired message in stderr | `AUTH_EXPIRED` | PAT past expiration | Create a new PAT; update the environment |
+| Warning per item; item skipped | `REF_INVALID` | Title matched but password field missing | Store the secret in the password field |
+| Warning per item; value skipped | `EMPTY_VALUE` | Password field empty | Fill the field; empty values are never applied |
+| Fetch aborted; timeout message | `TIMEOUT` | Resolution exceeded `timeout_seconds` | Increase timeout; reduce vault size; check network |
 | Transport / connectivity errors | `NETWORK` | Proton API unreachable | Check network; retry |
 | Unexpected plugin error | `INTERNAL` | Bug or contract violation | Check logs; file an issue |
 
-Per-reference failures are recorded as warnings; other mapped secrets may still resolve. Global failures (`NOT_CONFIGURED`, `BINARY_MISSING`, `AUTH_FAILED`, `TIMEOUT`) skip the entire source for that startup.
-
-## Plugin timing note
-
-Per the [Hermes secret-source plugin docs](https://hermes-agent.nousresearch.com/docs/developer-guide/secret-source-plugin), plugin discovery runs after the first `load_hermes_dotenv()` in a process. The discovering process may not apply plugin secret sources on that first load. Every subsequently spawned Hermes process (gateway children, cron sessions, subagents) does consult enabled plugin sources. Bundled sources (Bitwarden, 1Password) cover first-process bootstrap; plan plugin-only setups accordingly.
+Non-matching titles are skipped (summary warning). Empty passwords are skipped. Global failures (`NOT_CONFIGURED`, `BINARY_MISSING`, `AUTH_FAILED`, `TIMEOUT`) skip the entire source for that startup.
 
 ## Development
 
