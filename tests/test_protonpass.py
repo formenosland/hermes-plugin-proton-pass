@@ -154,7 +154,7 @@ class TestHappyPath:
 
         def fake_run(argv, *, allow_env=(), extra_env=None, timeout=30):
             calls.append(list(argv))
-            if argv[1:] == ["test"]:
+            if argv[1:] == ["info"]:
                 return _completed(returncode=0)
             if argv[1:3] == ["item", "list"]:
                 return _completed(stdout=LIST_FIXTURE)
@@ -193,7 +193,7 @@ class TestHappyPath:
         monkeypatch.setenv(DEFAULT_TOKEN_ENV, "pst_test_token")
 
         def fake_run(argv, *, allow_env=(), extra_env=None, timeout=30):
-            if argv[1:] == ["test"]:
+            if argv[1:] == ["info"]:
                 return _completed(returncode=0)
             if argv[1:3] == ["item", "list"]:
                 return _completed(stdout="[]")
@@ -215,7 +215,7 @@ class TestHappyPath:
 
         def fake_run(argv, *, allow_env=(), extra_env=None, timeout=30):
             calls.append(list(argv))
-            if argv[1:] == ["test"]:
+            if argv[1:] == ["info"]:
                 return _completed(returncode=0)
             if argv[1:3] == ["item", "list"]:
                 return _completed(stdout='[{"title": "OPENAI_API_KEY"}]')
@@ -233,17 +233,48 @@ class TestHappyPath:
         assert "--vault-name" not in list_call
 
 
+LOGIN_HELP_BOTH_FLAGS = (
+    "Login to Proton Pass\n"
+    "  --personal-access-token <PAT>\n"
+    "  --pat <PAT>\n"
+)
+LOGIN_HELP_PAT_ONLY = "Login to Proton Pass\n  --pat <PAT>\n"
+
+
+def _is_pat_login(argv: list[str]) -> bool:
+    rest = argv[1:]
+    return rest[:1] == ["login"] and (
+        "--pat" in rest or "--personal-access-token" in rest
+    )
+
+
 class TestLoginPath:
-    def test_test_fails_login_ok_then_list(
+    def test_info_fails_pat_login_then_list(
         self, source, home_path, monkeypatch, tmp_path
     ):
         binary = _fake_binary(tmp_path)
-        monkeypatch.setenv(DEFAULT_TOKEN_ENV, "pst_test_token")
+        token = "pst_test_token"
+        monkeypatch.setenv(DEFAULT_TOKEN_ENV, token)
+        calls: list[list[str]] = []
+        info_calls = {"n": 0}
 
         def fake_run(argv, *, allow_env=(), extra_env=None, timeout=30):
+            calls.append(list(argv))
+            if argv[1:] == ["info"]:
+                info_calls["n"] += 1
+                if info_calls["n"] == 1:
+                    return _completed(
+                        returncode=1, stderr="requires an authenticated client"
+                    )
+                return _completed(returncode=0)
+            if argv[1:] == ["login", "--help"]:
+                return _completed(stdout=LOGIN_HELP_BOTH_FLAGS)
             if argv[1:] == ["test"]:
-                return _completed(returncode=1, stderr="not logged in")
-            if argv[1:] == ["login"]:
+                return _completed(
+                    returncode=2, stderr="unrecognized subcommand 'test'"
+                )
+            if _is_pat_login(argv):
+                assert token in argv
                 return _completed(returncode=0)
             if argv[1:3] == ["item", "list"]:
                 return _completed(stdout='[{"title": "GITHUB_TOKEN"}]')
@@ -255,6 +286,71 @@ class TestLoginPath:
         result = source.fetch(_enabled_cfg(binary), home_path)
         assert result.ok
         assert result.secrets == {"GITHUB_TOKEN": "from-login"}
+        assert not any(c[1:] == ["login"] for c in calls)
+        assert any(_is_pat_login(c) for c in calls)
+        assert "--personal-access-token" in next(c for c in calls if _is_pat_login(c))
+        login = next(c for c in calls if _is_pat_login(c))
+        assert login[-1] == token
+
+    def test_info_ok_skips_login(self, source, home_path, monkeypatch, tmp_path):
+        binary = _fake_binary(tmp_path)
+        monkeypatch.setenv(DEFAULT_TOKEN_ENV, "pst_test_token")
+        calls: list[list[str]] = []
+
+        def fake_run(argv, *, allow_env=(), extra_env=None, timeout=30):
+            calls.append(list(argv))
+            if argv[1:] == ["info"]:
+                return _completed(returncode=0)
+            if argv[1:3] == ["item", "list"]:
+                return _completed(stdout='[{"title": "GITHUB_TOKEN"}]')
+            if argv[1:4] == ["item", "view", "--"]:
+                return _completed(stdout="kept\n")
+            return _completed(returncode=1, stderr="unexpected")
+
+        monkeypatch.setattr("protonpass.run_secret_cli", fake_run)
+        result = source.fetch(_enabled_cfg(binary), home_path)
+        assert result.ok
+        assert result.secrets == {"GITHUB_TOKEN": "kept"}
+        assert not any(c[1] == "login" for c in calls if len(c) > 1)
+
+    def test_missing_test_subcommand_still_logs_in(
+        self, source, home_path, monkeypatch, tmp_path
+    ):
+        binary = _fake_binary(tmp_path)
+        token = "pst_test_token"
+        monkeypatch.setenv(DEFAULT_TOKEN_ENV, token)
+        calls: list[list[str]] = []
+        info_calls = {"n": 0}
+
+        def fake_run(argv, *, allow_env=(), extra_env=None, timeout=30):
+            calls.append(list(argv))
+            if argv[1:] == ["info"]:
+                info_calls["n"] += 1
+                if info_calls["n"] == 1:
+                    return _completed(returncode=1, stderr="no session")
+                return _completed(returncode=0)
+            if argv[1:] == ["login", "--help"]:
+                return _completed(stdout=LOGIN_HELP_PAT_ONLY)
+            if argv[1:] == ["test"]:
+                return _completed(
+                    returncode=2, stderr="error: unrecognized subcommand 'test'"
+                )
+            if _is_pat_login(argv):
+                assert token in argv
+                return _completed(returncode=0)
+            if argv[1:3] == ["item", "list"]:
+                return _completed(stdout='[{"title": "GITHUB_TOKEN"}]')
+            if argv[1:4] == ["item", "view", "--"]:
+                return _completed(stdout="from-login\n")
+            return _completed(returncode=1, stderr="unexpected")
+
+        monkeypatch.setattr("protonpass.run_secret_cli", fake_run)
+        result = source.fetch(_enabled_cfg(binary), home_path)
+        assert result.ok
+        assert not any(c[1:] == ["login"] for c in calls)
+        assert any(_is_pat_login(c) for c in calls)
+        login = next(c for c in calls if _is_pat_login(c))
+        assert login[-1] == token
 
 
 class TestEmptyValue:
@@ -263,7 +359,7 @@ class TestEmptyValue:
         monkeypatch.setenv(DEFAULT_TOKEN_ENV, "pst_test_token")
 
         def fake_run(argv, *, allow_env=(), extra_env=None, timeout=30):
-            if argv[1:] == ["test"]:
+            if argv[1:] == ["info"]:
                 return _completed(returncode=0)
             if argv[1:3] == ["item", "list"]:
                 return _completed(
@@ -323,7 +419,7 @@ class TestTokenRemap:
 
         def fake_run(argv, *, allow_env=(), extra_env=None, timeout=30):
             seen_extra.append(dict(extra_env or {}))
-            if argv[1:] == ["test"]:
+            if argv[1:] == ["info"]:
                 return _completed(returncode=0)
             if argv[1:3] == ["item", "list"]:
                 return _completed(stdout='[{"title": "OPENAI_API_KEY"}]')

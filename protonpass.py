@@ -196,6 +196,84 @@ def _run_cli(
     )
 
 
+_login_flag_by_binary: Dict[str, str] = {}
+
+
+def _cli_text(proc) -> str:
+    return f"{proc.stdout or ''}\n{proc.stderr or ''}"
+
+
+def _looks_unrecognized(text: str, subcommand: str) -> bool:
+    lowered = scrub_ansi(text).lower()
+    return "unrecognized" in lowered and subcommand in lowered
+
+
+def _session_probe_ok(proc) -> bool:
+    if proc.returncode != 0:
+        return False
+    lowered = scrub_ansi(_cli_text(proc)).lower()
+    return "no session" not in lowered and "requires an authenticated" not in lowered
+
+
+def _probe_session(
+    binary: Path,
+    allow_env: Sequence[str],
+    token: str,
+):
+    info_proc = _run_cli(
+        [str(binary), "info"],
+        allow_env=allow_env,
+        token=token,
+    )
+    if not _looks_unrecognized(_cli_text(info_proc), "info"):
+        return _session_probe_ok(info_proc)
+    test_proc = _run_cli(
+        [str(binary), "test"],
+        allow_env=allow_env,
+        token=token,
+    )
+    if _looks_unrecognized(_cli_text(test_proc), "test"):
+        return False
+    return _session_probe_ok(test_proc)
+
+
+def _pat_login_flag(
+    binary: Path,
+    allow_env: Sequence[str],
+    token: str,
+) -> str:
+    key = str(binary)
+    cached = _login_flag_by_binary.get(key)
+    if cached:
+        return cached
+    help_proc = _run_cli(
+        [str(binary), "login", "--help"],
+        allow_env=allow_env,
+        token=token,
+    )
+    help_text = _cli_text(help_proc)
+    flag = (
+        "--personal-access-token"
+        if "--personal-access-token" in help_text
+        else "--pat"
+    )
+    _login_flag_by_binary[key] = flag
+    return flag
+
+
+def _set_login_error(result: FetchResult, stderr: str, returncode: int) -> None:
+    result.error = _format_cli_error("login", returncode, stderr)
+    result.error_kind = _classify_stderr(stderr)
+    if result.error_kind not in (
+        ErrorKind.AUTH_FAILED,
+        ErrorKind.AUTH_EXPIRED,
+        ErrorKind.NETWORK,
+        ErrorKind.TIMEOUT,
+        ErrorKind.BINARY_MISSING,
+    ):
+        result.error_kind = ErrorKind.AUTH_FAILED
+
+
 def _ensure_session(
     binary: Path,
     allow_env: Sequence[str],
@@ -203,22 +281,11 @@ def _ensure_session(
     result: FetchResult,
 ) -> bool:
     try:
-        test_proc = _run_cli(
-            [str(binary), "test"],
-            allow_env=allow_env,
-            token=token,
-        )
-    except RuntimeError as exc:
-        result.error = str(exc)
-        result.error_kind = _classify_stderr(str(exc))
-        return False
-
-    if test_proc.returncode == 0:
-        return True
-
-    try:
+        if _probe_session(binary, allow_env, token):
+            return True
+        flag = _pat_login_flag(binary, allow_env, token)
         login_proc = _run_cli(
-            [str(binary), "login"],
+            [str(binary), "login", flag, token],
             allow_env=allow_env,
             token=token,
         )
@@ -228,20 +295,20 @@ def _ensure_session(
         return False
 
     if login_proc.returncode != 0:
-        stderr = login_proc.stderr or ""
-        result.error = _format_cli_error("login", login_proc.returncode, stderr)
-        result.error_kind = _classify_stderr(stderr)
-        if result.error_kind not in (
-            ErrorKind.AUTH_FAILED,
-            ErrorKind.AUTH_EXPIRED,
-            ErrorKind.NETWORK,
-            ErrorKind.TIMEOUT,
-            ErrorKind.BINARY_MISSING,
-        ):
-            result.error_kind = ErrorKind.AUTH_FAILED
+        _set_login_error(result, login_proc.stderr or "", login_proc.returncode)
         return False
 
-    return True
+    try:
+        if _probe_session(binary, allow_env, token):
+            return True
+    except RuntimeError as exc:
+        result.error = str(exc)
+        result.error_kind = _classify_stderr(str(exc))
+        return False
+
+    result.error = _format_cli_error("info", 1, "session missing after login")
+    result.error_kind = ErrorKind.AUTH_FAILED
+    return False
 
 
 def _list_argv(binary: Path, vault: str) -> List[str]:

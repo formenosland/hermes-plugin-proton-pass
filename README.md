@@ -7,9 +7,8 @@ Hermes Agent secret-source plugin that bulk-injects provider credentials from a 
 - **Bulk vault dump** — list items in one required vault; inject titles matching `^[A-Z][A-Z0-9_]{0,63}$`
 - **Password field only** — Netflix-style titles are skipped; empty passwords are never applied (`EMPTY_VALUE`)
 - **Bootstrap PAT** — personal access token from the process environment (systemd `EnvironmentFile`, Hermes `.env`, or the shell). `.env` is optional.
-- **`pass-cli` subprocess via `run_secret_cli`** — minimal allowlisted child env; argv-only; stdin closed; no shell; never full `os.environ`
-- **Non-interactive session ensure** — `pass-cli test` then `pass-cli login` when needed; never prompts on the startup path
-- **Fail-open `ErrorKind`s** — structured errors (`NOT_CONFIGURED`, `AUTH_FAILED`, etc.); Hermes startup continues; missing secrets are reported, not fatal
+- **Non-interactive `pass-cli`** — session check and PAT login on fetch; no TTY prompts
+- **Fail-open** — structured `ErrorKind`s; Hermes startup continues; missing secrets are reported, not fatal
 - **Protected bootstrap token** — `protected_env_vars` prevents any secret source from overwriting the PAT
 - **Orchestrator-owned application** — plugin returns a mapping; Hermes applies precedence, conflicts, provenance, and timeouts
 
@@ -112,17 +111,17 @@ There is no `env:` map and no operator-maintained `pass://` lines.
 
 ## Authentication
 
-This plugin follows the same bootstrap-token model as Hermes's bundled Bitwarden source: one machine-local PAT unlocks the vault; item titles in that vault become env vars.
+One PAT in the process environment unlocks the configured vault. Item titles in that vault become env vars. You do not run `pass-cli login` yourself on the Hermes host.
 
-On fetch, the plugin checks the session with `pass-cli test`. If the session is missing or invalid, it runs `pass-cli login` non-interactively using the PAT from the allowlisted child environment. It never prompts — startup runs in non-TTY contexts (gateway, cron, Docker).
+PAT sessions last about two hours. The plugin re-authenticates when the session is gone.
 
-**Headless environments:** when the OS keyring is unavailable (containers, headless servers), set filesystem key storage per [Proton Pass CLI configuration](https://protonpass.github.io/pass-cli/get-started/configuration/):
+**Headless hosts** (no OS keyring): set filesystem key storage per [Proton Pass CLI configuration](https://protonpass.github.io/pass-cli/get-started/configuration/):
 
 ```bash
 export PROTON_PASS_KEY_PROVIDER=fs
 ```
 
-Optional overrides: `PROTON_PASS_SESSION_DIR`, `PROTON_PASS_ENCRYPTION_KEY`, `PROTON_PASS_LINUX_KEYRING`. These names are allowlisted into the `pass-cli` child; the plugin never forwards the full process environment.
+Optional: `PROTON_PASS_SESSION_DIR`, `PROTON_PASS_ENCRYPTION_KEY`, `PROTON_PASS_LINUX_KEYRING` (passed through to `pass-cli`).
 
 ## Security
 
@@ -141,7 +140,7 @@ Hermes fail-opens on secret-source errors: startup continues, but affected crede
 | --- | --- | --- | --- |
 | Source skipped; vault or PAT missing | `NOT_CONFIGURED` | `enabled: true` but blank `vault` or unset PAT | Set `secrets.protonpass.vault`; export `PROTON_PASS_PERSONAL_ACCESS_TOKEN` |
 | `pass-cli` not found | `BINARY_MISSING` | CLI not installed or not on `PATH` | Install `pass-cli` or set `binary_path` |
-| Login or session check failed | `AUTH_FAILED` | Invalid or revoked PAT; insufficient vault grants | Recreate PAT; `pass-cli pat access grant` for the vault |
+| Login or session check failed | `AUTH_FAILED` | Invalid or revoked PAT; session expired; insufficient vault grants; missing keyring on a headless host | Recreate PAT; grant vault access; set `PROTON_PASS_KEY_PROVIDER=fs` if there is no OS keyring |
 | Token expired message in stderr | `AUTH_EXPIRED` | PAT past expiration | Create a new PAT; update the environment |
 | Warning per item; item skipped | `REF_INVALID` | Title matched but password field missing | Store the secret in the password field |
 | Warning per item; value skipped | `EMPTY_VALUE` | Password field empty | Fill the field; empty values are never applied |
