@@ -54,6 +54,8 @@ Further reading:
 
    Or copy the repository contents into `~/.hermes/plugins/proton-pass/`.
 
+   Hermes loads `~/.hermes/plugins/proton-pass/` as a package; `__init__.py` must use relative imports. If load fails with `No module named 'protonpass'`, this import is wrong.
+
 4. **Enable the plugin** in `~/.hermes/config.yaml`:
 
    ```yaml
