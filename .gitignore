@@ -1,14 +1,17 @@
 # Deny everything at the repo root; allow only what we ship.
 /*
 
-!/.gitignore
-!/LICENSE
-!/README.md
-!/__init__.py
-!/plugin.yaml
-!/protonpass.py
-!/pyproject.toml
-!/tests/
+!tests/
+!.github/
+!.gitignore
+!CHANGELOG.md
+!cog.toml
+!LICENSE
+!README.md
+!__init__.py
+!plugin.yaml
+!protonpass.py
+!pyproject.toml
 
 # Exclude Artifacts
 __pycache__

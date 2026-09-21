@@ -1,0 +1,34 @@
+# https://docs.cocogitto.io/reference/config
+from_latest_tag = true
+ignore_merge_commits = true
+tag_prefix = "v"
+branch_whitelist = ["main"]
+
+pre_bump_hooks = [
+	"""
+	tmp=$(mktemp)
+	sed 's/^version: .*/version: {{version}}/' plugin.yaml > "$tmp"
+	mv "$tmp" plugin.yaml
+	git add plugin.yaml
+	""",
+	"""
+	tmp=$(mktemp)
+	sed 's/^version = \".*\"/version = \"{{version}}\"/' pyproject.toml > "$tmp"
+	mv "$tmp" pyproject.toml
+	git add pyproject.toml
+	""",
+]
+
+post_bump_hooks = []
+
+[commit_types]
+chore = { omit_from_changelog = true }
+test = { omit_from_changelog = true }
+ci = { omit_from_changelog = true }
+
+[changelog]
+path = "CHANGELOG.md"
+template = "remote"
+remote = "github.com"
+owner = "formenosland"
+repository = "hermes-plugin-proton-pass"
