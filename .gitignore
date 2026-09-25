@@ -3,12 +3,14 @@
 
 !tests/
 !.github/
+!skills/
 !.gitignore
 !CHANGELOG.md
 !cog.toml
 !LICENSE
 !README.md
 !__init__.py
+!cli.py
 !plugin.yaml
 !protonpass.py
 !pyproject.toml

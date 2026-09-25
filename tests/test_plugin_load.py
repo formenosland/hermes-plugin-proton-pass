@@ -12,10 +12,15 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_register_loads_from_hyphenated_plugin_dir(tmp_path: Path):
-    plugin_dir = tmp_path / "proton-pass"
+    plugin_dir = tmp_path / "protonpass"
     plugin_dir.mkdir()
-    for name in ("__init__.py", "protonpass.py", "plugin.yaml"):
+    for name in ("__init__.py", "protonpass.py", "cli.py", "plugin.yaml"):
         (plugin_dir / name).write_text((ROOT / name).read_text())
+    skill = plugin_dir / "skills" / "diagnose"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        (ROOT / "skills" / "diagnose" / "SKILL.md").read_text()
+    )
 
     script = textwrap.dedent(
         f"""
@@ -44,13 +49,22 @@ def test_register_loads_from_hyphenated_plugin_dir(tmp_path: Path):
         spec.loader.exec_module(module)
         assert callable(module.register)
         recorded = []
+        cli = []
+        skills = []
         class Ctx:
             def register_secret_source(self, source):
                 recorded.append(source)
+            def register_cli_command(self, **kwargs):
+                cli.append(kwargs)
+            def register_skill(self, name, path):
+                skills.append((name, path))
         module.register(Ctx())
         assert len(recorded) == 1
         assert recorded[0].__class__.__name__ == "ProtonPassSource"
         assert recorded[0].name == "protonpass"
+        assert cli and cli[0]["name"] == "protonpass"
+        assert skills and skills[0][0] == "diagnose"
+        assert skills[0][1].name == "SKILL.md"
         """
     )
     env = {

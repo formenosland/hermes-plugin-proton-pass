@@ -40,7 +40,7 @@ def _completed(
 def _enabled_cfg(binary: Path, **extra) -> dict:
     cfg = {
         "enabled": True,
-        "vault": "Personal",
+        "vault": "Hermes",
         "binary_path": str(binary),
     }
     cfg.update(extra)
@@ -84,7 +84,7 @@ class TestMalformedConfig:
 class TestNotConfigured:
     def test_missing_token(self, source, home_path, monkeypatch):
         monkeypatch.delenv(DEFAULT_TOKEN_ENV, raising=False)
-        result = source.fetch({"enabled": True, "vault": "Personal"}, home_path)
+        result = source.fetch({"enabled": True, "vault": "Hermes"}, home_path)
         assert result.error_kind == ErrorKind.NOT_CONFIGURED
         assert DEFAULT_TOKEN_ENV in (result.error or "")
 
@@ -125,7 +125,7 @@ class TestBinaryResolution:
     def test_missing_binary(self, source, home_path, monkeypatch):
         monkeypatch.setenv(DEFAULT_TOKEN_ENV, "pst_test_token")
         monkeypatch.setattr("protonpass.shutil.which", lambda _name: None)
-        result = source.fetch({"enabled": True, "vault": "Personal"}, home_path)
+        result = source.fetch({"enabled": True, "vault": "Hermes"}, home_path)
         assert result.error_kind == ErrorKind.BINARY_MISSING
 
     def test_pinned_binary_missing_no_path_fallback(
@@ -136,7 +136,7 @@ class TestBinaryResolution:
         result = source.fetch(
             {
                 "enabled": True,
-                "vault": "Personal",
+                "vault": "Hermes",
                 "binary_path": str(missing),
             },
             home_path,
@@ -161,9 +161,9 @@ class TestHappyPath:
             if argv[1:4] == ["item", "view", "--"]:
                 ref = argv[4]
                 values = {
-                    "pass://Personal/OPENAI_API_KEY/password": "sk-openai",
-                    "pass://Personal/GITHUB_TOKEN/password": "ghp_token",
-                    "pass://Personal/ANTHROPIC_API_KEY/password": "sk-ant",
+                    "pass://Hermes/OPENAI_API_KEY/password": "sk-openai",
+                    "pass://Hermes/GITHUB_TOKEN/password": "ghp_token",
+                    "pass://Hermes/ANTHROPIC_API_KEY/password": "sk-ant",
                 }
                 return _completed(stdout=values.get(ref, "") + "\n")
             return _completed(returncode=1, stderr="unexpected command")
@@ -184,7 +184,7 @@ class TestHappyPath:
         assert any("Skipped" in w and "env-var" in w for w in result.warnings)
         list_call = next(c for c in calls if c[1:3] == ["item", "list"])
         assert "--output" in list_call and "json" in list_call
-        assert "--vault-name" in list_call and "Personal" in list_call
+        assert "--vault-name" in list_call and "Hermes" in list_call
         assert "--filter-state" in list_call and "active" in list_call
         assert any(c[1:4] == ["item", "view", "--"] for c in calls)
 
@@ -381,6 +381,31 @@ class TestEmptyValue:
         assert any("empty value" in warning.lower() for warning in result.warnings)
 
 
+class TestFreshness:
+    def test_second_fetch_returns_updated_password(
+        self, source, home_path, monkeypatch, tmp_path
+    ):
+        binary = _fake_binary(tmp_path)
+        monkeypatch.setenv(DEFAULT_TOKEN_ENV, "pst_test_token")
+        passwords = iter(["first-secret\n", "rotated-secret\n"])
+
+        def fake_run(argv, *, allow_env=(), extra_env=None, timeout=30):
+            if argv[1:] == ["info"]:
+                return _completed(returncode=0)
+            if argv[1:3] == ["item", "list"]:
+                return _completed(stdout='[{"title": "OPENAI_API_KEY"}]')
+            if argv[1:4] == ["item", "view", "--"]:
+                return _completed(stdout=next(passwords))
+            return _completed(returncode=1, stderr="unexpected")
+
+        monkeypatch.setattr("protonpass.run_secret_cli", fake_run)
+        cfg = _enabled_cfg(binary)
+        first = source.fetch(cfg, home_path)
+        second = source.fetch(cfg, home_path)
+        assert first.secrets == {"OPENAI_API_KEY": "first-secret"}
+        assert second.secrets == {"OPENAI_API_KEY": "rotated-secret"}
+
+
 class TestHooks:
     def test_shape_is_bulk(self, source):
         assert source.shape == "bulk"
@@ -402,6 +427,20 @@ class TestHooks:
         assert source.is_enabled({}) is False
         assert source.is_enabled({"enabled": False}) is False
         assert source.is_enabled({"enabled": True}) is True
+
+    def test_remediation_points_at_status(self, source):
+        from agent.secret_sources.base import ErrorKind as Kind
+
+        for kind in (
+            Kind.NOT_CONFIGURED,
+            Kind.BINARY_MISSING,
+            Kind.AUTH_FAILED,
+            Kind.AUTH_EXPIRED,
+        ):
+            hint = source.remediation(kind, {})
+            assert "hermes protonpass status" in hint
+        assert source.remediation(Kind.NETWORK, {}) == ""
+        assert source.remediation(Kind.TIMEOUT, {}) == ""
 
     def test_fetch_timeout_uses_orchestrator_default(self, source):
         assert source.fetch_timeout_seconds({}) == 120.0

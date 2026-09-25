@@ -22,6 +22,8 @@ Hermes Agent secret-source plugin that bulk-injects provider credentials from a 
 
 When `secrets.protonpass` is enabled, this plugin reads the PAT from the configured env var, ensures a `pass-cli` session, lists active items in `secrets.protonpass.vault`, and for each title that is a valid env-var name fetches the password field (`pass-cli item view` is an internal helper, not operator config). Resolved values are returned to the Hermes orchestrator, which applies them according to source precedence and `override_existing`. The plugin never writes `os.environ` itself. Product code maps those env names onto Hermes; this plugin does not ship an `env:` map.
 
+Each fetch asks `pass-cli` again. A password changed in the vault is what the next Hermes start receives. `override_existing` defaults to `true`, so that start replaces a value already set from the shell, `.env`, or an earlier apply. A long-running process keeps the environment it loaded until it starts again. `hermes protonpass status` does not read item values.
+
 Further reading:
 
 - [Hermes secret-source plugin contract](https://hermes-agent.nousresearch.com/docs/developer-guide/secret-source-plugin)
@@ -43,40 +45,34 @@ Further reading:
 
    ```bash
    pass-cli pat create --name "hermes-agent" --expiration 3m
-   pass-cli pat access grant --pat-name "hermes-agent" --vault-name "Personal" --role viewer
+   pass-cli pat access grant --pat-name "hermes-agent" --vault-name "Hermes" --role viewer
    ```
 
-3. **Install the plugin** into your Hermes plugins directory:
+3. **Install the plugin** with Hermes. It clones this repo into `~/.hermes/plugins/protonpass/` and enables it in the same step:
 
    ```bash
-   git clone https://github.com/formenosland/hermes-plugin-proton-pass.git ~/.hermes/plugins/proton-pass
+   hermes plugins install formenosland/hermes-plugin-proton-pass --enable
    ```
 
-   Or copy the repository contents into `~/.hermes/plugins/proton-pass/`.
-
-   Hermes loads `~/.hermes/plugins/proton-pass/` as a package; `__init__.py` must use relative imports. If load fails with `No module named 'protonpass'`, this import is wrong.
-
-4. **Enable the plugin** in `~/.hermes/config.yaml`:
-
-   ```yaml
-   plugins:
-     enabled:
-       - proton-pass
-   ```
-
-   Or run: `hermes plugins enable proton-pass`
-
-5. **Provide the PAT** in the process environment. systemd units can use `EnvironmentFile`; Hermes `~/.hermes/.env` is optional:
+   Pin an immutable commit when you want a fixed revision (tags and branch names are not accepted):
 
    ```bash
-   PROTON_PASS_PERSONAL_ACCESS_TOKEN=pst_…::…
+   hermes plugins install formenosland/hermes-plugin-proton-pass --ref <40-character-sha> --enable
    ```
 
-   If you use `~/.hermes/.env`, `chmod 600` it.
+   [Install in Hermes Desktop](hermes://plugin/install?repo=formenosland/hermes-plugin-proton-pass&enable=1)
 
-6. **Name vault items like env vars** — e.g. `OPENAI_API_KEY`, `GITHUB_TOKEN`. Put the secret in the **password** field. Titles such as `Netflix` are skipped.
+   That command enables the plugin and prompts for `PROTON_PASS_PERSONAL_ACCESS_TOKEN`.
 
-7. **Configure `secrets.protonpass`** — see [Configuration](#configuration) below.
+4. **Name vault items like env vars** — e.g. `OPENAI_API_KEY`, `GITHUB_TOKEN`. Put the secret in the **password** field. Titles such as `Netflix` are skipped.
+
+5. **Choose the vault**:
+
+   ```bash
+   hermes protonpass setup
+   ```
+
+   That writes `plugins.enabled` and `secrets.protonpass` (`enabled: true` plus the vault name). It does not ask for the token. Restart Hermes after it finishes.
 
 ## Configuration
 
@@ -96,20 +92,29 @@ Example `~/.hermes/config.yaml`:
 ```yaml
 plugins:
   enabled:
-    - proton-pass
+    - protonpass
 
 secrets:
   sources:
     - protonpass
   protonpass:
     enabled: true
-    vault: Personal
+    vault: Hermes
     personal_access_token_env: PROTON_PASS_PERSONAL_ACCESS_TOKEN
     override_existing: true
     timeout_seconds: 120
 ```
 
 There is no `env:` map and no operator-maintained `pass://` lines.
+
+## Commands
+
+```bash
+hermes protonpass setup
+hermes protonpass status
+```
+
+`setup` asks for the vault name (`--vault` skips the prompt) and saves it. `status` prints whether the plugin is enabled, whether `secrets.protonpass` is enabled, the vault name, the token env var name, whether that variable is set, and whether `pass-cli` was found. It does not print the token or any item value.
 
 ## Authentication
 
@@ -159,9 +164,9 @@ pip install -e ".[dev]"
 pytest
 ```
 
-Unit tests run hermetically: if Hermes Agent is not installed, a minimal stub of `agent.secret_sources.base` under `tests/stubs/` is used.
+Unit tests run hermetically: if Hermes Agent is not installed, a minimal stub of `agent.secret_sources.base` under `tests/stubs/` is used. Nothing in the suite talks to Proton.
 
-Conformance tests import `SecretSourceConformance` from the Hermes agent repository (`tests/secret_sources/conformance.py`). If that module is not importable, conformance tests are skipped. Add a Hermes checkout to `PYTHONPATH` (or install Hermes) to run the full suite.
+Conformance tests import `SecretSourceConformance` from a Hermes Agent checkout. Point `HERMES_AGENT_CHECKOUT` at that clone (CI uses the `v2026.9.14` tag). If the module is not importable, those tests are skipped.
 
 ## License
 

@@ -361,6 +361,25 @@ class ProtonPassSource(SecretSource):
     def protected_env_vars(self, cfg: dict) -> frozenset[str]:
         return frozenset({_token_env_name(_coerce_cfg(cfg))})
 
+    def remediation(self, kind, cfg: dict) -> str:  # noqa: ARG002
+        value = getattr(kind, "value", kind)
+        if value == ErrorKind.NOT_CONFIGURED.value:
+            return (
+                "Set secrets.protonpass.vault and export the personal access "
+                "token, then run `hermes protonpass status`."
+            )
+        if value == ErrorKind.BINARY_MISSING.value:
+            return (
+                "Install pass-cli or set secrets.protonpass.binary_path, then "
+                "run `hermes protonpass status`."
+            )
+        if value in (ErrorKind.AUTH_FAILED.value, ErrorKind.AUTH_EXPIRED.value):
+            return (
+                "Recreate the personal access token and grant the vault, then "
+                "run `hermes protonpass status`."
+            )
+        return ""
+
     def config_schema(self) -> dict:
         return {
             "enabled": {"description": "Master switch", "default": False},
