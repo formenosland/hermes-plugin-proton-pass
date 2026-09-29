@@ -136,3 +136,32 @@ def test_setup_writes_vault_without_token(tmp_path: Path):
     again = write_setup(text, "Work")
     assert again.count("protonpass:") == 1
     assert read_status_config(again)["vault"] == "Work"
+
+
+def test_setup_preserves_comments_sibling_and_spaced_vault():
+    from cli import write_setup
+
+    original = "\n".join(
+        [
+            "model: anthropic",
+            "# provider keys live in Proton Pass",
+            "secrets:",
+            "  bitwarden:",
+            "    enabled: true",
+            "  protonpass:",
+            "    # operator note",
+            "    enabled: false",
+            '    vault: "Old"',
+            "",
+        ]
+    )
+    updated = write_setup(original, "Personal Ops")
+    assert "model: anthropic" in updated
+    assert "# provider keys live in Proton Pass" in updated
+    assert "bitwarden:" in updated
+    assert "    # operator note" in updated
+    assert 'vault: "Personal Ops"' in updated
+    assert "pst_" not in updated
+    parsed = read_status_config(updated)
+    assert parsed["vault"] == "Personal Ops"
+    assert parsed["enabled"] is True

@@ -431,8 +431,8 @@ class TestHooks:
     def test_remediation_points_at_status(self, source):
         from agent.secret_sources.base import ErrorKind as Kind
 
+        assert "hermes protonpass setup" in source.remediation(Kind.NOT_CONFIGURED, {})
         for kind in (
-            Kind.NOT_CONFIGURED,
             Kind.BINARY_MISSING,
             Kind.AUTH_FAILED,
             Kind.AUTH_EXPIRED,

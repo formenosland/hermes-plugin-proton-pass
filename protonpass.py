@@ -365,8 +365,8 @@ class ProtonPassSource(SecretSource):
         value = getattr(kind, "value", kind)
         if value == ErrorKind.NOT_CONFIGURED.value:
             return (
-                "Set secrets.protonpass.vault and export the personal access "
-                "token, then run `hermes protonpass status`."
+                "Run `hermes protonpass setup` to set the vault. "
+                "Plugin install prompts for the personal access token."
             )
         if value == ErrorKind.BINARY_MISSING.value:
             return (
