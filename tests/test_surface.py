@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import cli
-from cli import read_status_config, status_lines
+from cli import read_status_config, register_proton_pass_cli, status_lines
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -165,3 +166,17 @@ def test_setup_preserves_comments_sibling_and_spaced_vault():
     parsed = read_status_config(updated)
     assert parsed["vault"] == "Personal Ops"
     assert parsed["enabled"] is True
+
+
+def test_cli_setup_accepts_vault_on_the_parser_hermes_passes():
+    """Hermes creates the protonpass parser and passes that parser to setup_fn."""
+    root = argparse.ArgumentParser(prog="hermes")
+    subparsers = root.add_subparsers(dest="command")
+    parser = subparsers.add_parser("protonpass")
+    register_proton_pass_cli(parser)
+
+    setup = root.parse_args(["protonpass", "setup", "--vault", "Istandil"])
+    assert setup.proton_pass_action == "setup"
+    assert setup.vault == "Istandil"
+    status = root.parse_args(["protonpass", "status"])
+    assert status.proton_pass_action == "status"

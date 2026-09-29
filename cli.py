@@ -308,11 +308,7 @@ def status_command(args=None, **kwargs) -> None:  # noqa: ARG001
     print("\n".join(status_lines(home)))
 
 
-def register_proton_pass_cli(subparsers) -> None:
-    parser = subparsers.add_parser(
-        "protonpass",
-        help="Inspect the Proton Pass bulk secret source",
-    )
+def register_proton_pass_cli(parser) -> None:
     commands = parser.add_subparsers(dest="proton_pass_action", required=True)
     status = commands.add_parser(
         "status",
