@@ -1,5 +1,5 @@
 name: protonpass
-version: 1.0.0
+version: 1.1.0
 description: Bulk-inject Hermes credentials from a Proton Pass vault via pass-cli
 author: Formenos Land
 kind: standalone
